@@ -86,6 +86,7 @@ class DDImporter extends FormApplication {
       "g": "Grid",
       "y": "Vertical",
       "x": "Horizontal",
+      "l": "Levels"
     }
     data.multiImageMode = settings.multiImageMode || "g";
     data.webpConversion = settings.webpConversion;
@@ -131,6 +132,7 @@ class DDImporter extends FormApplication {
         try {
           files.push(JSON.parse(await fe[0].files[0].text()));
           fileName = fileName + '-' + fe[0].files[0].name.split(".")[0];
+          files[files.length-1].name = fe[0].files[0].name.split(".")[0];
           // save the first filename
           if (files.length == 1) {
             firstFileName = fe[0].files[0].name.split(".")[0]
@@ -219,6 +221,16 @@ class DDImporter extends FormApplication {
         }
         gridw = hwidth * grid_size.x
         gridh = vcount * grid_size.y
+      } else if (mode == "l") {
+        for(let i = 0; i < files.length; i++) {
+          files[i].elevation = i;
+        }
+        gridw = grid_size.x
+        gridh = grid_size.y
+        for (var f = 0; f < files.length; f++) {
+          files[f].pos_in_image = { "x": 0, "y": 0 }
+          files[f].pos_in_grid = { "x": 0, "y": 0 }
+        }
       }
       width = gridw * pixelsPerGrid
       height = gridh * pixelsPerGrid
@@ -228,33 +240,39 @@ class DDImporter extends FormApplication {
 
       // This code works for both single files and multiple files and supports resizing during scene generation
       // Use a canvas to place the image in case we need to convert something
-      let thecanvas = document.createElement('canvas');
-      thecanvas.width = width;
-      thecanvas.height = height;
-      let mycanvas = thecanvas.getContext("2d");
-      ui.notifications.notify("Processing Images")
+      
+      let canvases = [];
       for (var fidx = 0; fidx < files.length; fidx++) {
+        let thecanvas = document.createElement('canvas');
+        thecanvas.width = width;
+        thecanvas.height = height;
+        let mycanvas = thecanvas.getContext("2d");
+        ui.notifications.notify("Processing Images")
         ui.notifications.notify("Processing " + (fidx + 1) + " out of " + files.length + " images")
         let f = files[fidx];
         image_type = DDImporter.getImageType(atob(f.image.substr(0, 8)));
-        await DDImporter.image2Canvas(mycanvas, f, image_type, size.x, size.y)
+        await DDImporter.image2Canvas(mycanvas, f, image_type, size.x, size.y);
+        canvases.push({
+          canvas:thecanvas,
+          fileName: files[fidx].name,
+          path
+        });
       }
       ui.notifications.notify("Uploading image ....")
       if (toWebp) 
       {
         image_type = 'webp';
       }
-
-      var p = new Promise(function (resolve) {
-        thecanvas.toBlob(function (blob) {
+      let p = Promise.all(canvases.map(canvas=>{
+        return new Promise(function(resolve){canvas.canvas.toBlob(function (blob) {
           blob.arrayBuffer().then(bfr => {
-            DDImporter.uploadFile(bfr, fileName, path, source, image_type, bucket)
+            DDImporter.uploadFile(bfr, canvas.fileName, canvas.path, source, image_type, bucket)
               .then(function () {
                 resolve()
               })
           });
         }, "image/" + image_type, (toWebp ? webpQuality : undefined))
-      })
+    })}));
 
 
 
@@ -270,6 +288,7 @@ class DDImporter extends FormApplication {
         "portals": [],
         "environment": files[0]["environment"],
         "lights": [],
+        "levels": files.map(a=>a.name)
       }
 
       // adapt the walls
@@ -279,6 +298,7 @@ class DDImporter extends FormApplication {
           f.line_of_sight = f.line_of_sight.concat(f.objects_line_of_sight || [])
         f.line_of_sight.forEach(function (los) {
           los.forEach(function (z) {
+            z.elevation = fidx;
             z.x += f.pos_in_grid.x
             z.y += f.pos_in_grid.y
           })
@@ -287,11 +307,13 @@ class DDImporter extends FormApplication {
           port.position.x += f.pos_in_grid.x
           port.position.y += f.pos_in_grid.y
           port.bounds.forEach(function (z) {
+            z.elevation = fidx;
             z.x += f.pos_in_grid.x
             z.y += f.pos_in_grid.y
           })
         })
         f.lights.forEach(function (port) {
+          z.elevation = fidx;
           port.position.x += f.pos_in_grid.x
           port.position.y += f.pos_in_grid.y
         })
@@ -517,7 +539,7 @@ class DDImporter extends FormApplication {
     let newScene = new Scene({
       name: sceneName,
       grid: pixelsPerGrid,
-      img: imagePath,
+      // img: path+file.levels[0]+"."+extension,
       width: pixelsPerGrid * file.resolution.map_size.x,
       height: pixelsPerGrid * file.resolution.map_size.y,
       padding: padding,
@@ -527,13 +549,44 @@ class DDImporter extends FormApplication {
     newScene.updateSource(
       {
         walls: this.GetWalls(file, newScene, 6 - fidelity, offset, pixelsPerGrid).concat(this.GetDoors(file, newScene, offset, pixelsPerGrid)).map(i => i.toObject()),
-        lights: this.GetLights(file, newScene, pixelsPerGrid).map(i => i.toObject())
-      })
-    //mergeObject(newScene.data, {walls: walls.concat(doors), lights: lights})
+        lights: this.GetLights(file, newScene, pixelsPerGrid).map(i => i.toObject()),
+      });
+      //mergeObject(newScene.data, {walls: walls.concat(doors), lights: lights})
     let scene = await Scene.create(newScene.toObject());
-    scene.createThumbnail().then(thumb => {
-      scene.update({ "thumb": thumb.thumb });
-    })
+    let tiles = file.levels.map((a,i)=>{
+        return {
+          img: path+a+"."+extension,
+          width:  pixelsPerGrid * file.resolution.map_size.x,
+          height: pixelsPerGrid * file.resolution.map_size.y,
+          x: Math.ceil(padding* file.resolution.map_size.x)*pixelsPerGrid,
+          y: Math.ceil(padding* file.resolution.map_size.y)*pixelsPerGrid,
+          elevation: i*10,
+          roof: false,
+          overhead: true,
+          flags:{
+            levels:{
+              rangeBottom: i*10,
+              rangeTop: i*10+9,
+              showIfAbove: true,
+              noCollision: true,
+              showAboveRange: 9
+            }
+          }
+        }
+    });
+    scene.setFlag(CONFIG.Levels.MODULE_ID, "sceneLevels", file.levels.map((a,i)=>{
+          return [i*10, i*10+9, a]
+        }))
+    let value = CONFIG.Levels.UI.rangeEnabled;
+    CONFIG.Levels.UI.rangeEnabled = false;
+    // console.log(tiles);
+    await scene.createEmbeddedDocuments("Tile", tiles);
+    CONFIG.Levels.UI.rangeEnabled = value;
+    // console.log(t);
+    setTimeout(()=>
+      scene.createThumbnail().then(thumb => {
+        scene.update({ "thumb": thumb.thumb });
+    }),0);
   }
 
   static GetWalls(file, scene, skipNum, offset, pixelsPerGrid) {
@@ -548,10 +601,10 @@ class DDImporter extends FormApplication {
       for (let i = 0; i < ddWalls.length; i++) {
 
         if (i == wsIndex) continue
-        if (wallSet[wallSet.length - 1].x == ddWalls[i][0].x && wallSet[wallSet.length - 1].y == ddWalls[i][0].y) {
+        if (wallSet[wallSet.length - 1].x == ddWalls[i][0].x && wallSet[wallSet.length - 1].y == ddWalls[i][0].y&& wallSet[wallSet.length - 1].elevation == ddWalls[i][0].elevation) {
           connectTo.push(ddWalls[i][0])
         }
-        if (wallSet[0].x == ddWalls[i][ddWalls[i].length - 1].x && wallSet[0].y == ddWalls[i][ddWalls[i].length - 1].y) {
+        if (wallSet[0].x == ddWalls[i][ddWalls[i].length - 1].x && wallSet[0].y == ddWalls[i][ddWalls[i].length - 1].y && wallSet[0].elevation == ddWalls[i][ddWalls[i].length - 1].elevation) {
           connectedTo.push(wallSet[0])
         }
       }
@@ -593,7 +646,11 @@ class DDImporter extends FormApplication {
           ((pointA.y - originY) * pixelsPerGrid) + offsetY,
           ((pointB.x - originX) * pixelsPerGrid) + offsetX,
           ((pointB.y - originY) * pixelsPerGrid) + offsetY
-        ]
+        ],
+        flags: {"wall-height":{
+          bottom: (pointA.elevation??0)*10,
+          top: (pointA.elevation??0)*10+9
+        }}
       })
     }
     catch (e) {
@@ -753,7 +810,11 @@ class DDImporter extends FormApplication {
           door: game.settings.get("dd-import", "openableWindows") ? 1 : (door.closed ? 1 : 0), // If openable windows - all portals should be doors, otherwise, only portals that "block light" should be openable (doors)
           light : door.closed ? CONST.WALL_SENSE_TYPES.NORMAL : CONST.WALL_SENSE_TYPES.PROXIMITY, 
           sight : door.closed ? CONST.WALL_SENSE_TYPES.NORMAL : CONST.WALL_SENSE_TYPES.PROXIMITY,
-          threshold : door.closed ? {} : {attenuation : true, light : 10, sight : 10} 
+          threshold : door.closed ? {} : {attenuation : true, light : 10, sight : 10} ,
+          flags:{"wall-height":{
+            bottom: (door.bounds[0].elevation??0)*10,
+            top: (door.bounds[0].elevation??0)*10+9
+          }}
         }))   // Proximity type if door.closed = false (assumes they are windows)
       }
       catch(e)
@@ -782,7 +843,11 @@ class DDImporter extends FormApplication {
             bright: (light.range * (game.system.gridDistance || 1)) / 2,
           angle: 360,
           tintColor: "#" + light.color.substring(2),
-          tintAlpha: (0.05 * light.intensity)
+          tintAlpha: (0.05 * light.intensity),
+          flags:{"levels":{
+            rangeBottom: (light.position.elevation??0)*10,
+            rangeTop: (light.position.elevation??0)*10+9
+          }}
         })
         lights.push(newLight);
         }
