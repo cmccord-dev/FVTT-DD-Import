@@ -7,7 +7,8 @@
   "authors": [
     {"name": "Moo Man", "id": "Moo Man", "discord": "moo.man"},
     {"name": "m42e", "id": "m42e"},
-    {"name": "jacquie", "id": "jacquie"}
+    {"name": "jacquie", "id": "jacquie"},
+    {"name":"casserowl", "id": "casserowl", "discord":"eiowlta"}
   ],
   "scripts": [
     "ddimport.js"
